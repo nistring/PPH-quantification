@@ -4,7 +4,7 @@ import sys
 from pathlib import Path
 
 from config import Config
-from analyzer import SimplePPHAnalyzer
+from analyzer import PPHAnalyzer
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 def main():
     parser = argparse.ArgumentParser(description="Simplified PPH Quantification")
     parser.add_argument("--patient-dir", "-p", required=True,
-                       help="Patient directory with 201/, 601/, 701/ subdirectories")
+                       help="Patient directory")
     parser.add_argument("--output", "-o", default="output",
                        help="Output directory")
     parser.add_argument("--fast", action="store_true",
@@ -37,37 +37,9 @@ def main():
     config.use_fast_mode = args.fast
     
     # Initialize analyzer
-    analyzer = SimplePPHAnalyzer(config)
+    analyzer = PPHAnalyzer(config)
     
-    try:
-        # Run analysis
-        results = analyzer.analyze_patient(patient_dir, output_dir)
-        
-        # Print results
-        print("\n" + "="*60)
-        print("PPH ANALYSIS RESULTS")
-        print("="*60)
-        print(f"Patient: {results['patient_name']}")
-        print(f"Processing time: {results['processing_time']:.1f}s")
-        print("\nHemorrhage volumes:")
-        for phase, volume in results['hemorrhage_volumes'].items():
-            print(f"  {phase:12}: {volume:6.2f} mL")
-        
-        analysis = results['analysis']
-        print(f"\nAnalysis:")
-        print(f"  Arterial enhancement: {analysis['arterial_enhancement']:+.2f} mL")
-        print(f"  Portal change:        {analysis['portal_change']:+.2f} mL")
-        print(f"  Active bleeding:      {analysis['active_bleeding']}")
-        print(f"  Severity:            {analysis['severity']}")
-        print(f"  Needs intervention:  {analysis['needs_intervention']}")
-        print(f"  Peak phase:          {analysis['peak_phase']}")
-        
-        print(f"\nResults saved to: {output_dir}")
-        print("="*60)
-        
-    except Exception as e:
-        logger.error(f"Analysis failed: {e}")
-        sys.exit(1)
+    results = analyzer.analyze_patient(patient_dir, output_dir)
 
 if __name__ == "__main__":
     main()

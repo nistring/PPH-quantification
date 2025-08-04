@@ -1,16 +1,9 @@
-# Core dependencies
-pydicom>=2.3.0
-SimpleITK>=2.2.0
-nibabel>=4.0.0
-numpy>=1.21.0
-scipy>=1.8.0
-pandas>=1.4.0
-
-# Medical imaging
-dicom2nifti>=2.4.0
-
-# Optional: for advanced image processing
-scikit-image>=0.19.0
-
-# TotalSegmentator (install separately)
-# pip install TotalSegmentator
+dicom2nifti==2.6.2
+matplotlib==3.10.5
+numpy==2.3.2
+pandas==2.3.1
+pydicom==3.0.1
+scipy==1.16.1
+seaborn==0.13.2
+simpleitk==2.5.2
+statannotations==0.7.2

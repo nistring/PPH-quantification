@@ -13,84 +13,43 @@ from dicom_processor import DICOMProcessor
 
 logger = logging.getLogger(__name__)
 
-class SimplePPHAnalyzer:
-    """Simplified three-phase PPH analyzer"""
-    
+class PPHAnalyzer:
     def __init__(self, config: Config = None):
         self.config = config or Config()
         self.dicom_processor = DICOMProcessor(self.config.temp_dir)
         
     def analyze_patient(self, patient_dir: Path, output_dir: Path) -> Dict[str, Any]:
-        """
-        Analyze patient with three phases
-        
-        Args:
-            patient_dir: Directory with 201/, 601/, 701/ subdirectories
-            output_dir: Output directory
-            
-        Returns:
-            Analysis results
-        """
+        """Analyze patient with available phases"""
         start_time = time.time()
         output_dir.mkdir(parents=True, exist_ok=True)
         
         logger.info(f"Analyzing patient: {patient_dir.name}")
         
-        results_file = output_dir / "results.json"
+        # Find available phases
+        series_dirs = {}
+        for phase, subdir_name in [("arterial", "Arterial"), ("portal", "Portal")]:
+            series_dir = patient_dir / subdir_name
+            if series_dir.exists() and any(series_dir.iterdir()):
+                series_dirs[phase] = series_dir
+                logger.info(f"Found {phase} phase")
         
-        # Check required series exist
-        series_dirs = {
-            "non_enhanced": patient_dir / "201",
-            "arterial": patient_dir / "601", 
-            "portal": patient_dir / "701"
-        }
-        
-        for phase, series_dir in series_dirs.items():
-            if not series_dir.exists():
-                raise FileNotFoundError(f"Missing series {series_dir}")
+        if not series_dirs:
+            raise FileNotFoundError(f"No valid series found in {patient_dir}")
         
         try:
-            # Step 1: Convert DICOM to NIfTI (check if already exists)
-            logger.info("Converting DICOM to NIfTI...")
-            nifti_files = {}
-            for phase, series_dir in series_dirs.items():
-                nifti_path = output_dir / f"{phase}.nii.gz"
-                if nifti_path.exists():
-                    logger.info(f"NIfTI file already exists for {phase}, skipping conversion...")
-                    nifti_files[phase] = nifti_path
-                else:
-                    self.dicom_processor.dicom_to_nifti(series_dir, nifti_path)
-                    nifti_files[phase] = nifti_path
+            nifti_files = self._convert_dicom_files(series_dirs, output_dir)
+            common_mask = self._create_common_uterus_mask(nifti_files, output_dir)
+            hemorrhage_results, hemorrhage_masks = self._detect_hemorrhage(nifti_files, common_mask, output_dir)
+            self._create_overlay_visualizations(nifti_files, common_mask, hemorrhage_masks, output_dir)
             
-            # Step 2: Create uterus masks for each phase using TotalSegmentator exclusion
-            logger.info("Creating uterus masks for each phase...")
-            uterus_masks = self._create_uterus_masks_all_phases(nifti_files, output_dir)
-            
-            # Step 3: Detect hemorrhage in each phase using respective uterus masks
-            logger.info("Detecting hemorrhage...")
-            hemorrhage_results = self._detect_hemorrhage_all_phases(
-                nifti_files, uterus_masks, output_dir
-            )
-            
-            # Step 4: Analyze results
-            analysis = self._analyze_results(hemorrhage_results)
-            
-            # Compile final results
             results = {
                 "patient_name": patient_dir.name,
                 "processing_time": time.time() - start_time,
-                "hemorrhage_volumes": {
-                    phase: data["volume_ml"] for phase, data in hemorrhage_results.items()
-                },
-                "uterus_mask_volumes": {
-                    phase: self._calculate_volume(mask) for phase, mask in uterus_masks.items()
-                },
-                "analysis": analysis,
-                "output_dir": str(output_dir)
+                "hemorrhage_volumes": {phase: data["volume_ml"] for phase, data in hemorrhage_results.items()},
+                "uterus_mask_volume": self._calculate_volume(common_mask),
             }
             
-            # Save results
-            with open(results_file, 'w') as f:
+            with open(output_dir / "results.json", 'w') as f:
                 json.dump(results, f, indent=2)
             
             logger.info(f"Analysis completed in {results['processing_time']:.1f}s")
@@ -102,290 +61,160 @@ class SimplePPHAnalyzer:
         finally:
             self._cleanup()
     
-    def _create_uterus_masks_all_phases(self, nifti_files: Dict[str, Path], output_dir: Path) -> Dict[str, sitk.Image]:
-        """Create uterus masks for all three phases using TotalSegmentator exclusion"""
-        uterus_masks = {}
-        
-        for phase, nifti_path in nifti_files.items():
-            logger.info(f"Creating uterus mask for {phase} phase...")
-            
-            # Check if uterus mask already exists
-            mask_path = output_dir / f"uterus_mask_{phase}.nii.gz"
-            if mask_path.exists():
-                logger.info(f"Uterus mask already exists for {phase}, loading existing mask...")
-                uterus_mask = sitk.ReadImage(str(mask_path))
-                uterus_masks[phase] = uterus_mask
-                volume_ml = self._calculate_volume(uterus_mask)
-                logger.info(f"Loaded existing uterus mask {phase}: {volume_ml:.2f} mL")
-                continue
-
-            # Define output file paths
-            total_file = output_dir / f"total_{phase}.nii"
-            tissue_types_file = output_dir / f"tissue_types_{phase}.nii"
-            vertebrae_body_file = output_dir / f"vertebrae_body_{phase}.nii"
-            self._create_uterus_mask_by_exclusion(nifti_path, [total_file, tissue_types_file, vertebrae_body_file], phase)
-                
-            # Load reference image and create mask from existing segmentation
-            reference_img = sitk.ReadImage(str(nifti_path))
-            uterus_mask = self._exclude_segmented_files([total_file, tissue_types_file, vertebrae_body_file], reference_img)
-            
-            # Save uterus mask
-            sitk.WriteImage(uterus_mask, str(mask_path))
-            
-            # Save debug masks if enabled
-            if hasattr(self.config, 'save_debug_masks') and self.config.save_debug_masks:
-                debug_dir = output_dir / "debug_masks"
-                debug_dir.mkdir(exist_ok=True)
-                sitk.WriteImage(uterus_mask, str(debug_dir / f"refined_uterus_mask_{phase}.nii.gz"))
-            
-            uterus_masks[phase] = uterus_mask
-            
-            # Log mask statistics
-            volume_ml = self._calculate_volume(uterus_mask)
-            logger.info(f"Uterus mask {phase}: {volume_ml:.2f} mL")
-        
-        return uterus_masks
+    def _convert_dicom_files(self, series_dirs: Dict[str, Path], output_dir: Path) -> Dict[str, Path]:
+        """Convert DICOM files to NIfTI format"""
+        nifti_files = {}
+        for phase, series_dir in series_dirs.items():
+            nifti_path = output_dir / f"{phase}.nii.gz"
+            if not nifti_path.exists():
+                self.dicom_processor.dicom_to_nifti(series_dir, nifti_path)
+            nifti_files[phase] = nifti_path
+        return nifti_files
     
-    def _create_uterus_mask_by_exclusion(self, nifti_path: Path, output_paths: Path, phase: str) -> None:
-        """Create uterus mask by excluding all segmented areas from TotalSegmentator"""
-        for output_file in output_paths:
-            if not output_file.exists():
-                self._run_totalsegmentator(nifti_path, output_file, output_file.name.replace(f"_{phase}.nii", ""))
-            else:
-                logger.info(f"Output file {output_file.name} already exists, skipping TotalSegmentator for {phase} phase...")
+    def _create_common_uterus_mask(self, nifti_files: Dict[str, Path], output_dir: Path) -> sitk.Image:
+        """Create common uterus mask"""
+        common_mask_path = output_dir / "common_uterus_mask.nii.gz"
+        
+        # Create individual masks
+        individual_masks = {}
+        for phase, nifti_path in nifti_files.items():
+            mask_path = output_dir / f"uterus_mask_{phase}.nii.gz"
+            mask = self._create_individual_mask(nifti_path, output_dir, phase)
+            mask = self._apply_morphology(mask)
+            sitk.WriteImage(mask, str(mask_path))
+            individual_masks[phase] = mask
+        
+        # Create common mask
+        phases = list(individual_masks.keys())
+        common_mask = individual_masks[phases[0]]
+        
+        if len(phases) > 1:
+            for i in range(1, len(phases)):
+                other_mask = individual_masks[phases[i]]
+                if not self._spatial_match(other_mask, common_mask):
+                    other_mask = self._resample_image(other_mask, common_mask)
+                common_mask = sitk.Multiply(common_mask, other_mask)
+            logger.info(f"Created intersection mask from phases: {phases}")
+        else:
+            logger.info(f"Using single phase ({phases[0]}) mask")
+        
+        sitk.WriteImage(common_mask, str(common_mask_path))
+        return common_mask
+    
+    def _create_individual_mask(self, nifti_path: Path, output_dir: Path, phase: str) -> sitk.Image:
+        """Create individual uterus mask by exclusion"""
+        reference_img = sitk.ReadImage(str(nifti_path))
+        uterus_array = np.ones(sitk.GetArrayFromImage(reference_img).shape, dtype=np.uint8)
+        
+        # Run TotalSegmentator tasks and apply exclusions
+        tasks = ["total", "tissue_types", "vertebrae_body"]
+        for task in tasks:
+            seg_file = output_dir / f"{task}_{phase}.nii"
+            if not seg_file.exists():
+                self._run_totalsegmentator(nifti_path, seg_file, task)
+            
+            seg_img = sitk.ReadImage(str(seg_file))
+            if seg_img.GetSize() != reference_img.GetSize():
+                seg_img = self._resample_image(seg_img, reference_img)
+            
+            if task in ["tissue_types", "vertebrae_body"]:
+                seg_img = sitk.BinaryDilate(seg_img, [self.config.morphology_radius] * 3, sitk.sitkBall, 0, 1)
+            
+            seg_array = sitk.GetArrayFromImage(seg_img)
+            uterus_array[(seg_array > 0) & (seg_array != 21)] = 0  # Exclude bladder
+
+        # Apply HU filtering
+        ref_array = sitk.GetArrayFromImage(reference_img)
+        uterus_array = self._apply_filtering(uterus_array, ref_array, phase)
+        uterus_mask = sitk.GetImageFromArray(uterus_array)
+        uterus_mask.CopyInformation(reference_img)
+        
+        # Keep largest components
+        return self._keep_largest_components(uterus_mask)
     
     def _run_totalsegmentator(self, input_path: Path, output_file: Path, task: str):
         """Run TotalSegmentator with specified task"""
-        cmd = [
-            "TotalSegmentator",
-            "-i", str(input_path),
-            "-o", str(output_file),
-            "--task", task,
-            "--ml",
-        ]
+        cmd = ["TotalSegmentator", "-i", str(input_path), "-o", str(output_file), "--task", task, "--ml"]
         
         if self.config.use_fast_mode:
             cmd.append("--fast")
-        
         if self.config.device != "auto":
             cmd.extend(["--device", self.config.device])
         
         try:
-            logger.info(f"Running TotalSegmentator {task} task...")
-            result = subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=3600)
-            logger.info(f"TotalSegmentator {task} task completed successfully")
-        except subprocess.CalledProcessError as e:
-            logger.error(f"TotalSegmentator {task} task failed: {e.stderr}")
+            subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=3600)
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
             raise RuntimeError(f"TotalSegmentator {task} task failed")
-        except subprocess.TimeoutExpired:
-            logger.error(f"TotalSegmentator {task} task timed out")
-            raise RuntimeError(f"TotalSegmentator {task} task timed out")
-    
-    def _exclude_segmented_files(self, segmentation_files: list, reference_img: sitk.Image) -> sitk.Image:
-        """Create uterus mask by excluding all segmented areas from files"""
-        
-        # Start with an array of ones (all voxels are candidate uterus)
-        mask_shape = sitk.GetArrayFromImage(reference_img).shape
-        uterus_array = np.ones(mask_shape, dtype=np.uint8)
-        
-        # Exclude all segmented areas from the files
-        for seg_file in segmentation_files:
-            seg_file = Path(seg_file)
-            if not seg_file.exists():
-                logger.warning(f"Segmentation file {seg_file} does not exist, skipping...")
-                continue
-                
-            logger.info(f"Excluding segmentations from {seg_file.name}")
-            
-            try:
-                # Load segmentation mask
-                seg_img = sitk.ReadImage(str(seg_file))
-                
-                # Resample to match reference image if needed
-                if seg_img.GetSize() != reference_img.GetSize():
-                    resampler = sitk.ResampleImageFilter()
-                    resampler.SetReferenceImage(reference_img)
-                    resampler.SetInterpolator(sitk.sitkNearestNeighbor)
-                    resampler.SetDefaultPixelValue(0)
-                    seg_img = resampler.Execute(seg_img)
-                
-                if "tissue_types" or "vertebrae_body" in seg_file.name:
-                    # Dilate the subcutaneous fat to cover surface skin.
-                    dilate_filter = sitk.BinaryDilateImageFilter()
-                    dilate_filter.SetForegroundValue(1)  # subcutaneous fat or vertebrae body
-                    dilate_filter.SetKernelRadius(self.config.morphology_radius)
-                    seg_img = dilate_filter.Execute(seg_img)
-                    if "vertebrae_body" in seg_file.name:
-                        dilate_filter.SetForegroundValue(2)  # intervertebral disc
-                        dilate_filter.SetKernelRadius(self.config.morphology_radius)
-                        seg_img = dilate_filter.Execute(seg_img)
 
-                # Convert to array and exclude from uterus mask
-                seg_array = sitk.GetArrayFromImage(seg_img)
-                uterus_array[seg_array > 0] = 0
-
-                logger.debug(f"Excluded {seg_file.name}")
-                
-            except Exception as e:
-                logger.warning(f"Could not process segmentation {seg_file}: {e}")
-        
-        # Get reference array for additional filtering
-        ref_array = sitk.GetArrayFromImage(reference_img)
-        
-        # Apply comprehensive filtering
-        uterus_array = self._apply_comprehensive_filtering(uterus_array, ref_array)
-        
-        # Convert back to SimpleITK image
-        uterus_mask = sitk.GetImageFromArray(uterus_array)
-        uterus_mask.CopyInformation(reference_img)
-        
-        # Apply advanced refinement techniques
-        uterus_mask = self._clean_mask(uterus_mask)
-        uterus_mask = self._keep_largest_components(uterus_mask, max_components=self.config.max_components)
-        
-        logger.info(f"Created refined uterus mask. Remaining voxels: {np.sum(sitk.GetArrayFromImage(uterus_mask) > 0)}")
-        
-        return uterus_mask
-    
-    def _clean_mask(self, mask: sitk.Image) -> sitk.Image:
-        closing = sitk.VotingBinaryIterativeHoleFillingImageFilter()
-        closing.SetRadius(self.config.morphology_radius)
-        mask = closing.Execute(mask)
-        
-        return mask
-    
-    def _apply_comprehensive_filtering(self, uterus_array: np.ndarray, ref_array: np.ndarray) -> np.ndarray:
-        """Apply comprehensive filtering to remove non-uterine tissue"""
-        
-        # 3. Focus on soft tissue range typical for uterus
-        uterus_array[(ref_array < self.config.min_uterus_hu) | (ref_array > self.config.max_uterus_hu)] = 0
-        logger.debug(f"After soft tissue filtering: {np.sum(uterus_array)} voxels")
-        
-        # 4. Apply anatomical constraints based on image dimensions
-        z_size, y_size, x_size = uterus_array.shape
-        
-        # 5. Restrict to central region (exclude peripheral areas)
-        uterus_array[:, :, :int(x_size * self.config.x_margin[0])] = 0
-        uterus_array[:, :, int(y_size * self.config.x_margin[1]) :] = 0
-        uterus_array[:, :int(y_size * self.config.y_margin[0]), :] = 0 
-        uterus_array[:, int(y_size * self.config.y_margin[1]) :, :] = 0
-        uterus_array[:int(z_size * self.config.z_margin[0]), :, :] = 0
-        uterus_array[int(z_size * self.config.z_margin[1]) :, :, :] = 0
-        
-        logger.debug(f"After anatomical constraints: {np.sum(uterus_array)} voxels")
-        
-        return uterus_array
-    
-    def _keep_largest_components(self, mask: sitk.Image, max_components: int = None) -> sitk.Image:
-        """Keep only the largest connected components"""
-           
-        # Connected component labeling
-        cc_filter = sitk.ConnectedComponentImageFilter()
-        labeled_img = cc_filter.Execute(mask)
-        
-        # Label statistics to get component sizes
-        label_stats = sitk.LabelShapeStatisticsImageFilter()
-        label_stats.Execute(labeled_img)
-        
-        # Get labels sorted by size
-        labels = label_stats.GetLabels()
-        if not labels:
-            return mask
-        
-        # Sort by number of pixels (descending)
-        label_sizes = [(label, label_stats.GetNumberOfPixels(label)) for label in labels]
-        label_sizes.sort(key=lambda x: x[1], reverse=True)
-        
-        # Keep only the largest components
-        keep_labels = [label for label, size in label_sizes[:max_components]]
-        
-        # Create new mask with only selected components
-        new_mask = sitk.Image(mask.GetSize(), sitk.sitkUInt8)
-        new_mask.CopyInformation(mask)
-        
-        for label in keep_labels:
-            # Extract this component
-            threshold = sitk.BinaryThresholdImageFilter()
-            threshold.SetLowerThreshold(label)
-            threshold.SetUpperThreshold(label)
-            threshold.SetInsideValue(1)
-            threshold.SetOutsideValue(0)
-            component = threshold.Execute(labeled_img)
-            
-            # Add to new mask
-            add_filter = sitk.AddImageFilter()
-            new_mask = add_filter.Execute(new_mask, component)
-        
-        logger.info(f"Kept {len(keep_labels)} largest components")
-        return new_mask
-    
-    def _detect_hemorrhage_all_phases(self, nifti_files: Dict[str, Path], 
-                                    uterus_masks: Dict[str, sitk.Image], 
-                                    output_dir: Path) -> Dict[str, Dict]:
-        """Detect hemorrhage in all phases using respective uterus masks"""
+    def _detect_hemorrhage(self, nifti_files: Dict[str, Path], common_uterus_mask: sitk.Image, output_dir: Path) -> tuple[Dict[str, Dict], Dict[str, sitk.Image]]:
+        """Detect hemorrhage in available phases"""
         results = {}
+        hemorrhage_masks = {}
         
-        hu_thresholds = {
-            "non_enhanced": self.config.non_enhanced_hu,
-            "arterial": self.config.arterial_hu,
-            "portal": self.config.portal_hu
-        }
+        thresholds = {"arterial": getattr(self.config, 'arterial_th', 150), "portal": getattr(self.config, 'portal_th', 120)}
         
         for phase, nifti_path in nifti_files.items():
-            logger.info(f"Processing {phase} phase")
+            hu_threshold = thresholds.get(phase, thresholds["arterial"])
             
-            # Check if hemorrhage mask already exists
-            mask_path = output_dir / f"{phase}_hemorrhage.nii.gz"
-            if mask_path.exists():
-                logger.info(f"Hemorrhage mask already exists for {phase}, loading existing mask...")
-                hemorrhage_mask = sitk.ReadImage(str(mask_path))
-                volume_ml = self._calculate_volume(hemorrhage_mask)
-                
-                results[phase] = {
-                    "volume_ml": volume_ml,
-                    "hu_threshold": hu_thresholds[phase],
-                    "mask_file": mask_path.name
-                }
-                
-                logger.info(f"{phase}: {volume_ml:.2f} mL (existing)")
-                continue
+            hemorrhage_mask = sitk.BinaryThreshold(sitk.ReadImage(str(nifti_path)), hu_threshold, 1000, 1, 0)
+            if hemorrhage_mask.GetSize() != common_uterus_mask.GetSize():
+                hemorrhage_mask = self._resample_image(hemorrhage_mask, common_uterus_mask)
+            hemorrhage_mask = sitk.Multiply(hemorrhage_mask, common_uterus_mask)
             
-            # Load image
-            img = sitk.ReadImage(str(nifti_path))
-
-            # Gaussian smoothing with configurable sigma
-            gaussian = sitk.SmoothingRecursiveGaussianImageFilter()
-            gaussian.SetSigma(self.config.region_growing_sigma)
-            smoothed = gaussian.Execute(sitk.Cast(img, sitk.sitkFloat32))
-
-            # Apply HU threshold
-            min_hu, max_hu = hu_thresholds[phase]
-            threshold = sitk.BinaryThresholdImageFilter()
-            threshold.SetLowerThreshold(min_hu)
-            threshold.SetUpperThreshold(max_hu)
-            threshold.SetInsideValue(1)
-            threshold.SetOutsideValue(0)
-            hemorrhage_mask = threshold.Execute(img)
+            hemorrhage_mask_path = output_dir / f"{phase}_hemorrhage.nii.gz"
+            sitk.WriteImage(hemorrhage_mask, str(hemorrhage_mask_path))
             
-            # Apply phase-specific uterus mask
-            multiply = sitk.MultiplyImageFilter()
-            hemorrhage_mask = multiply.Execute(hemorrhage_mask, uterus_masks[phase])
-            
-            # Calculate volume
-            volume_ml = self._calculate_volume(hemorrhage_mask)
-            
-            # Save mask
-            sitk.WriteImage(hemorrhage_mask, str(mask_path))
-            
+            hemorrhage_masks[phase] = hemorrhage_mask
             results[phase] = {
-                "volume_ml": volume_ml,
-                "hu_threshold": hu_thresholds[phase],
-                "mask_file": mask_path.name
+                "volume_ml": self._calculate_volume(hemorrhage_mask),
+                "hu_threshold": hu_threshold,
+                "mask_file": hemorrhage_mask_path.name
             }
             
-            logger.info(f"{phase}: {volume_ml:.2f} mL")
+            logger.info(f"Detected hemorrhage in {phase} phase: {results[phase]['volume_ml']:.2f} mL")
         
-        return results
+        return results, hemorrhage_masks
+    
+    def _resample_image(self, image: sitk.Image, reference: sitk.Image) -> sitk.Image:
+        """Resample image to match reference with proper spatial alignment"""
+        resampler = sitk.ResampleImageFilter()
+        resampler.SetReferenceImage(reference)
+        resampler.SetInterpolator(sitk.sitkNearestNeighbor)
+        resampler.SetDefaultPixelValue(0)
+        
+        # Set output parameters explicitly to match reference
+        resampler.SetSize(reference.GetSize())
+        resampler.SetOutputSpacing(reference.GetSpacing())
+        resampler.SetOutputOrigin(reference.GetOrigin())
+        resampler.SetOutputDirection(reference.GetDirection())
+        
+        return resampler.Execute(image)
+    
+    def _apply_morphology(self, mask: sitk.Image) -> sitk.Image:
+        """Apply morphological operations"""
+        hole_fill = sitk.VotingBinaryIterativeHoleFillingImageFilter()
+        hole_fill.SetRadius([self.config.morphology_radius] * 3)
+        mask = hole_fill.Execute(mask)
+        
+        mask = sitk.BinaryMorphologicalClosing(mask, [self.config.morphology_radius] * 3)
+        mask = sitk.BinaryMorphologicalOpening(mask, [2] * 3)
+        
+        return mask
+
+    def _apply_filtering(self, uterus_array: np.ndarray, ref_array: np.ndarray, phase: str) -> np.ndarray:
+        """Apply HU filtering with fallback values"""
+        hu_ranges = {"arterial": (-50, 200), "portal": (-50, 180)}
+        
+        if phase == "arterial" and hasattr(self.config, 'arterial_hu'):
+            min_hu, max_hu = self.config.arterial_hu
+        elif phase == "portal" and hasattr(self.config, 'portal_hu'):
+            min_hu, max_hu = self.config.portal_hu
+        else:
+            min_hu, max_hu = hu_ranges.get(phase, hu_ranges["arterial"])
+            logger.warning(f"Using default HU range for {phase} phase: {min_hu} to {max_hu}")
+        
+        uterus_array[(ref_array < min_hu) | (ref_array > max_hu)] = 0
+        return uterus_array
     
     def _calculate_volume(self, mask: sitk.Image) -> float:
         """Calculate volume in mL"""
@@ -393,39 +222,53 @@ class SimplePPHAnalyzer:
         spacing = mask.GetSpacing()
         voxel_volume_mm3 = spacing[0] * spacing[1] * spacing[2]
         total_voxels = np.sum(mask_array > 0)
-        volume_ml = (total_voxels * voxel_volume_mm3) / 1000.0
-        return volume_ml
+        return (total_voxels * voxel_volume_mm3) / 1000.0
+
+    def _create_overlay_visualizations(self, nifti_files: Dict[str, Path], common_uterus_mask: sitk.Image,
+                                        hemorrhage_masks: Dict[str, sitk.Image], output_dir: Path):
+        """Create overlay visualizations"""
+        logger.info("Creating overlay visualizations...")
+        
+        for phase, nifti_path in nifti_files.items():
+            original_img = sitk.ReadImage(str(nifti_path))
+            phase_hemorrhage_mask = hemorrhage_masks[phase]
+            
+            # Ensure spatial alignment
+            if phase_hemorrhage_mask.GetSize() != original_img.GetSize():
+                phase_hemorrhage_mask = self._resample_image(phase_hemorrhage_mask, original_img)
+            if common_uterus_mask.GetSize() != original_img.GetSize():
+                common_uterus_mask = self._resample_image(common_uterus_mask, original_img)
+            
+            # Create overlay
+            uterus_surface = self._extract_surface(common_uterus_mask)
+            uterus_surface_array = sitk.GetArrayFromImage(uterus_surface)
+            hemorrhage_array = sitk.GetArrayFromImage(phase_hemorrhage_mask)          
+            
+            original_normalized = self._normalize_image_for_display(original_img)
+            original_normalized = sitk.GetArrayFromImage(original_normalized)
+            original_normalized[uterus_surface_array > 0] = 255  # Highlight uterus surface
+            original_normalized[hemorrhage_array > 0] = 0  # Highlight hemorrhage
+            original_normalized = sitk.GetImageFromArray(original_normalized)
+            original_normalized.CopyInformation(original_img)
+            
+            overlay_output_path = output_dir / f"{phase}_overlay.nii.gz"
+            sitk.WriteImage(original_normalized, str(overlay_output_path))
+            
+            logger.info(f"Created overlay visualization for {phase} phase: {overlay_output_path.name}")
     
-    def _analyze_results(self, hemorrhage_results: Dict) -> Dict[str, Any]:
-        """Analyze hemorrhage results across phases"""
-        volumes = {phase: data["volume_ml"] for phase, data in hemorrhage_results.items()}
-        
-        # Calculate enhancement
-        arterial_enhancement = volumes["arterial"] - volumes["non_enhanced"]
-        portal_change = volumes["portal"] - volumes["arterial"]
-        
-        # Determine active bleeding
-        active_bleeding = arterial_enhancement > 5.0  # >5mL enhancement
-        
-        # Clinical assessment
-        baseline_volume = volumes["non_enhanced"]
-        severity = self.config.get_severity(baseline_volume)
-        
-        # Intervention recommendation
-        needs_intervention = (
-            baseline_volume > self.config.moderate_threshold or 
-            active_bleeding
-        )
-        
-        return {
-            "volumes": volumes,
-            "arterial_enhancement": arterial_enhancement,
-            "portal_change": portal_change,
-            "active_bleeding": str(active_bleeding),
-            "severity": severity,
-            "needs_intervention": str(needs_intervention),
-            "peak_phase": max(volumes, key=volumes.get)
-        }
+    def _normalize_image_for_display(self, image: sitk.Image) -> sitk.Image:
+        """Normalize image to 0-255 range for display purposes"""
+        image_float = sitk.Cast(image, sitk.sitkFloat32)
+        # Use windowing appropriate for CT images (center=40, width=400)
+        image_windowed = sitk.Clamp(image_float, sitk.sitkFloat32, -160, 240)
+        image_normalized = sitk.RescaleIntensity(image_windowed, 0, 255)
+        return sitk.Cast(image_normalized, sitk.sitkUInt8)
+
+    def _extract_surface(self, mask: sitk.Image, thickness: int = 1) -> sitk.Image:
+        """Extract the outer surface of a binary mask using morphological gradient"""
+        radius = [thickness] * 3
+        dilated = sitk.BinaryDilate(mask, radius, sitk.sitkBall, 0, 1)
+        return sitk.Subtract(dilated, mask)
     
     def _cleanup(self):
         """Clean up temporary files"""
@@ -433,3 +276,33 @@ class SimplePPHAnalyzer:
             self.dicom_processor.cleanup_temp_files()
         except Exception as e:
             logger.warning(f"Cleanup failed: {e}")
+    
+    def _spatial_match(self, image1: sitk.Image, image2: sitk.Image) -> bool:
+        """Check if two images have matching spatial properties"""
+        return (image1.GetSize() == image2.GetSize() and 
+                image1.GetSpacing() == image2.GetSpacing() and
+                image1.GetOrigin() == image2.GetOrigin())
+    
+    def _keep_largest_components(self, mask: sitk.Image) -> sitk.Image:
+        """Keep largest connected components"""
+        labeled_img = sitk.ConnectedComponent(mask)
+        label_stats = sitk.LabelShapeStatisticsImageFilter()
+        label_stats.Execute(labeled_img)
+        
+        labels = label_stats.GetLabels()
+        if not labels:
+            return mask
+
+        # Sort by size and keep largest components
+        label_sizes = [(label, label_stats.GetNumberOfPixels(label)) for label in labels]
+        label_sizes.sort(key=lambda x: x[1], reverse=True)
+        keep_labels = [label for label, _ in label_sizes[:self.config.max_components]]
+
+        new_mask = sitk.Image(mask.GetSize(), sitk.sitkUInt8)
+        new_mask.CopyInformation(mask)
+
+        for label in keep_labels:
+            component = sitk.BinaryThreshold(labeled_img, label, label, 1, 0)
+            new_mask = sitk.Add(new_mask, component)
+        
+        return new_mask

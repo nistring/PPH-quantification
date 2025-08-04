@@ -210,3 +210,4 @@ data/
 results/
 extracted_series/
 .vscode
+output/
