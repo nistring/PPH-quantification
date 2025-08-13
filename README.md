@@ -9,14 +9,13 @@ This Python project provides a simplified yet effective approach to automated qu
 The tool implements a straightforward multi-phase analysis approach:
 
 1. **DICOM to NIfTI Conversion**: Converts arterial and portal phases to NIfTI format
-2. **Common Anatomical Masking**: Uses TotalSegmentator to exclude non-uterine structures for both phases, then creates intersection mask
-3. **Morphological Processing**: Applies hole filling and smoothing operations to the masks
+2. **Common Anatomical Masking**: Uses TotalSegmentator to exclude non-uterine structures for both phases, then creates an intersection mask
+3. **Morphological Processing**: Applies hole-filling and morphological operations to the masks
 4. **Multi-Phase Hemorrhage Detection**:
     - **Arterial Phase**: Detects hemorrhage using a HU threshold (e.g., >160 HU).
     - **Portal Phase**: Detects hemorrhage using a HU threshold (e.g., >180 HU).
     - **Subtraction Phase**: Creates a subtraction map (Portal - Arterial) and applies a HU threshold (e.g., >140 HU) to detect delayed extravasation.
 5. **Volume Calculation**: Measures hemorrhage volumes for each phase within the common uterine region
-6. **Clinical Assessment**: Provides severity classification and intervention recommendations
 
 ## Installation
 
