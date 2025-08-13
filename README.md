@@ -25,14 +25,12 @@ The tool implements a straightforward multi-phase analysis approach:
 - Python 3.9 or higher
 - CUDA-capable GPU (optional, for faster processing)
 
-### Step 1: Clone or Download
+### Step 1: Clone
 
 ```bash
 # If using git
 git clone <repository-url>
 cd pph-quantification
-
-# Or download and extract the ZIP file
 ```
 
 ### Step 2: Install Dependencies
