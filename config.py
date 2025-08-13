@@ -7,26 +7,25 @@ class Config:
     """Simplified configuration for PPH analysis"""
     
     # HU thresholds for hemorrhage detection (min_hu, max_hu)
-    arterial_hu: Tuple[int, int] = (50, 100)      # No lower limit, upper limit 150 HU
-    portal_hu: Tuple[int, int] = (50, 100)        # No lower limit, upper limit 100 HU
-    arterial_th: float = 100.0  # Threshold for arterial phase detection
-    portal_th: float = 50.0    # Threshold for portal phase detection
+    arterial_hu: Tuple[int, int] = (0, 250)
+    portal_hu: Tuple[int, int] = (0, 250)
+    arterial_threshold: float = 160  # Threshold
+    portal_threshold: float = 180  # Threshold
+    subtract: int = 130  # Subtraction threshold
 
     # Processing parameters
-    min_component_size: int = 50
-    morphology_radius: int = 5
+    morphology_radius: int = 3
     
     # TotalSegmentator settings
     use_fast_mode: bool = False
     device: str = "gpu:0"
-    
+
     # Output settings
     temp_dir: str = "temp"
     output_dir: str = "output"
     
     # Mask refinement parameters
     max_components: int = 1           # Maximum connected components to keep
-    region_growing_sigma: float = 1.0 # Gaussian smoothing sigma for boundary smoothing
     
     # Debug settings
     save_debug_masks: bool = False    # Save intermediate masks for debugging

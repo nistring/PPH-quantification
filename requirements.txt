@@ -6,4 +6,3 @@ pydicom==3.0.1
 scipy==1.16.1
 seaborn==0.13.2
 simpleitk==2.5.2
-statannotations==0.7.2
